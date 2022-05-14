@@ -1,110 +1,274 @@
-#ifndef STAGGERED_GRID_H_
-#define STAGGERED_GRID_H_
 
-#include <Eigen/Dense>
-#include <cstddef>
+#include <iostream>
+#include <math.h>
+
 #include <vector>
 
 #include "Array3D.h"
+
+#include <Eigen/Dense>
+
 #include "Particle.h"
 
-// A data type representing a grid with velocity components defined at grid cell
-// boundaries and cell-specific values, including pressure, defined at grid cell
-// centers
 class StaggeredGrid {
- public:
-  // Used to label cells
-  enum MaterialType { EMPTY, SOLID, FLUID };
+  public:
+    enum MaterialType{
+        SOLID, FLUID, EMPTY
+    };
 
-  // Allocates a 3D staggered grid storing the following quantities as
-  // a simulation's time proceeds:
-  // - |nx| x |ny| x |nz| array of fluid pressures
-  // - |nx + 1| x |ny| x |nz| array of horizontal fluid velocities
-  // - |nx| x |ny + 1| + |nz| array of vertical fluid velocities
-  // - |nx| x |ny| x |nz + 1| array of depth fluid velocities
-  // - |lc| is the lower corner (min x, y, z) position of the grid
-  // - |dx| is the grid cell width (side length)
-  StaggeredGrid(std::size_t nx, std::size_t ny, std::size_t nz,
-                const Eigen::Vector3d& lc, double dx);
+    // dimensions
+    Eigen::Vector3d dims;
 
-  // Deallocates the data this grid stores.
-  ~StaggeredGrid();
+    // pressure
+    Array3D<double> sp;
 
-  const Array3D<double>& p() const { return p_; }
-  const Array3D<double>& u() const { return u_; }
-  const Array3D<double>& v() const { return v_; }
-  const Array3D<double>& w() const { return w_; }
-  const Array3D<MaterialType>& cell_labels() const { return cell_labels_; }
+    // vel
+    Array3D<double> su;
+    Array3D<double> sv;
+    Array3D<double> sw;
 
-  // Transfers particle velocities to this grid.
-  void ParticlesToGrid(const std::vector<Particle>& particles);
+    // accum
+    Array3D<double> fu;
+    Array3D<double> fv;
+    Array3D<double> fw;
 
- private:
-  // Don't allow copy constructor to be called.
-  StaggeredGrid(const StaggeredGrid& other);
+    const Eigen::Vector3d lc;
 
-  // Don't allow copy-assignment operator to be called.
-  StaggeredGrid& operator=(const StaggeredGrid& other);
+    const double dx;
 
-  void ZeroOutVelocities();
+    // Half-grid-cell-width shifts for splatting particle values onto the grid
+    const Eigen::Vector3d shift_yz_;  // (0, dx_/2, dx_/2)
+    const Eigen::Vector3d shift_xz_;  // (dx_/2, 0, dx_/2)
+    const Eigen::Vector3d shift_xy_;  // (dx_/2, dx_/2, 0)
 
-  void ClearCellLabels();
-  void SetOuterCellLabelsToSolid();
-  void SetInnerCellLabelsToEmpty();
+    Array3D<MaterialType> labels;
 
-  // Sets the label of the cell containing the particle with position |p_lc|
-  // relative to the grid's lower corner to |FLUID|.
-  void SetParticlesCellToFluid(const Eigen::Vector3d& p_lc);
+    StaggeredGrid(int gx, int gy, int gz, Eigen::Vector3d glc, double gdx) : 
+    dims(gx,gy,gz), sp(gx,gy,gz), 
+    su(gx+1,gy,gz), sv(gx,gy+1,gz), 
+    sw(gx,gy,gz+1), fu(gx+1,gy,gz), 
+    fv(gx,gy+1,gz), fw(gx,gy,gz+1),
+    lc(glc), dx(gdx), labels(gx, gy, gz),
+    shift_yz_(0.0,dx/2.0,dx/2.0), shift_xz_(dx/2.0,0.0,dx/2.0),
+    shift_xy_(dx/2.0, dx/2.0, 0.0) {
+        // reset();
+    }
 
-  void NormalizeHorizontalVelocities();
-  void NormalizeVerticalVelocities();
-  void NormalizeDepthVelocities();
+    const Array3D<double>& p() const{
+        return sp;
+    }
 
-  // Sets boundary conditions on the grid velocities.
-  void SetBoundaryVelocities();
+    const Array3D<double>& u() const{
+        return su;
+    }
 
-  // Number of rows of data this array stores (x or i direction)
-  const std::size_t nx_;
+    const Array3D<double>& v() const{
+        return sv;
+    }
 
-  // Number of columns of data this array stores (y or j direction)
-  const std::size_t ny_;
+    const Array3D<double>& w() const{
+        return sw;
+    }
 
-  // Depth of data this array stores (z or k direction)
-  const std::size_t nz_;
+    const Array3D<MaterialType>& cell_labels() const{
+        return labels;
+    }
 
-  // Size of a single stack of this array's data, for convenience
-  const std::size_t ny_nz_;
+    const int nx(){
+        return dims[0];
+    }
 
-  // Lower corner position (min x, y, z) of the grid
-  const Eigen::Vector3d lc_;
+    const int ny(){
+        return dims[1];
+    }
 
-  // Grid cell width (side length)
-  const double dx_;
+    const int nz(){
+        return dims[2];
+    }
 
-  // Half-grid-cell-width shifts for splatting particle values onto the grid
-  const Eigen::Vector3d half_shift_yz_;  // (0, dx_/2, dx_/2)
-  const Eigen::Vector3d half_shift_xz_;  // (dx_/2, 0, dx_/2)
-  const Eigen::Vector3d half_shift_xy_;  // (dx_/2, dx_/2, 0)
+    void ParticlesToGrid(const std::vector<Particle>& particles){
+        reset();
+        for (std::vector<Particle>::const_iterator p = particles.begin();
+                p != particles.end(); p++) {
+            Eigen::Vector3d pos = p->pos - lc;
+            Eigen::Vector3d vel = p->vel;
+            Eigen::Vector3d ijk = floor(pos,dx);
+            labels(ijk[0],ijk[1],ijk[2]) = MaterialType::FLUID;
 
-  // 3D array of fluid pressures
-  Array3D<double> p_;
+            Eigen::Vector3d pshift = pos - shift_yz_;
+            Eigen::Vector3d pshift1 = pos - shift_xz_;
+            Eigen::Vector3d pshift2 = pos - shift_xy_;
+            
+            Eigen::Vector3d cell = floor(pshift,dx);
+            Eigen::Vector3d bary = weights(pshift,cell);
+            splat(vel[0],bary,cell,&su,&fu);
+            cell = floor(pshift1,dx);
+            bary = weights(pshift1,cell);
+            splat(vel[1],bary,cell,&sv,&fv);
+            cell = floor(pshift2,dx);
+            bary = weights(pshift2,cell);
+            splat(vel[2],bary,cell,&sw,&fw);
+        }
+        normalize();
+        boundarySplat();
+    }
+  private:
+    // set all to zero and set material type to default values
+    void reset(){
+        su = 0.0;
+        sv = 0.0;
+        sw = 0.0;
+        fu = 0.0;
+        fv = 0.0;
+        fw = 0.0;
+        for(int i = 0; i<nx(); i++){
+            for(int j = 0; j<ny(); j++){
+                for(int k = 0; k<nz(); k++){
+                    if(i == 0 || i == nx() - 1 || j == 0 || j == ny() - 1 || k == 0 || k == nz() - 1){
+                        labels(i,j,k) = MaterialType::SOLID;
+                    }
+                    else{
+                        labels(i,j,k) = MaterialType::EMPTY;
+                    }
+                }
+            }
+        }
+    }
 
-  // 3D array of horizontal velocity components
-  Array3D<double> u_;
+    inline Eigen::Vector3d floor(Eigen::Vector3d p_lc, double dx){
+        assert(dx>0.0);
+        Eigen::Vector3d vec = p_lc / dx;
+        assert(vec[0]>=0.0);
+        assert(vec[1]>=0.0);
+        assert(vec[2]>=0.0);
+        // std::cout <<  "pos " << vec << std::endl;  
+        return vec;
+    }
 
-  // 3D array of vertical velocity components
-  Array3D<double> v_;
+    inline Eigen::Vector3d weights(Eigen::Vector3d p_lc_dx, Eigen::Vector3d cell){
+       
+        // std::cout <<  "weig p-lc" << (p-lc) << std::endl;  
+        // std::cout <<  "weig dx" << dx << std::endl;  
+        // std::cout <<  "weigh" << p_lc_dx - cell << std::endl;  
+        int i = cell[0];
+        int j = cell[1];
+        int k = cell[2];
+        Eigen::Vector3d rhs(i,j,k);
+        return p_lc_dx - rhs;
+    }
 
-  // 3D array of depth (z direction) velocity components
-  Array3D<double> w_;
+    inline void splat(double v, Eigen::Vector3d& bary,Eigen::Vector3d& cell, Array3D<double>* grid, Array3D<double>* f){
+        // std::cout <<  "ori " << (1-bary[0])*(1-bary[1])*(1-bary[2])*v << "i"<<cell[0] << "j"<<cell[1] << "k"<<cell[2] << std::endl;  
+        (*grid)(cell[0],cell[1],cell[2]) += (1-bary[0])*(1-bary[1])*(1-bary[2])*v;
+        (*f)(cell[0],cell[1],cell[2]) += (1-bary[0])*(1-bary[1])*(1-bary[2]);
+        (*grid)(cell[0] + 1,cell[1],cell[2]) += (bary[0])*(1-bary[1])*(1-bary[2])*v;
+        (*f)(cell[0] + 1,cell[1],cell[2]) += (bary[0])*(1-bary[1])*(1-bary[2]);
+        (*grid)(cell[0],cell[1] + 1,cell[2]) += (1-bary[0])*(bary[1])*(1-bary[2])*v;
+        (*f)(cell[0],cell[1] + 1,cell[2]) += (1-bary[0])*(bary[1])*(1-bary[2]);
+        (*grid)(cell[0] + 1,cell[1] + 1,cell[2]) += (bary[0])*(bary[1])*(1-bary[2])*v;
+        (*f)(cell[0] + 1,cell[1] + 1,cell[2]) += (bary[0])*(bary[1])*(1-bary[2]);
+        (*grid)(cell[0],cell[1],cell[2] + 1) += (1-bary[0])*(1-bary[1])*(bary[2])*v;
+        (*f)(cell[0],cell[1],cell[2] + 1) += (1-bary[0])*(1-bary[1])*(bary[2]);
+        (*grid)(cell[0] + 1,cell[1],cell[2] + 1) += (bary[0])*(1-bary[1])*(bary[2])*v;
+        (*f)(cell[0] + 1,cell[1],cell[2] + 1) += (bary[0])*(1-bary[1])*(bary[2]);
+        (*grid)(cell[0],cell[1] + 1,cell[2] + 1) += (1-bary[0])*(bary[1])*(bary[2])*v;
+        (*f)(cell[0],cell[1] + 1,cell[2] + 1) += (1-bary[0])*(bary[1])*(bary[2]);
+        (*grid)(cell[0] + 1,cell[1] + 1,cell[2] + 1) += (bary[0])*(bary[1])*(bary[2])*v;
+        (*f)(cell[0] + 1,cell[1] + 1,cell[2] + 1) += (bary[0])*(bary[1])*(bary[2]);
+    }
 
-  // Accumulated particle velocity-weights for each grid velocity component
-  Array3D<double> fu_;  // horizontal
-  Array3D<double> fv_;  // vertical
-  Array3D<double> fw_;  // depth
+    inline void normalize(){
+        for(int i = 0; i<=nx(); i++){
+            for(int j = 0; j<=ny(); j++){
+                for(int k = 0; k<=nz(); k++){
+                    if(j != ny() && k != nz()){
+                        if(i != 0 && i != 1 && i != nx() - 1 && i != nx()){
+                            if(fu(i,j,k) > 0.00001){
+                                su(i,j,k) /= fu(i,j,k);
+                            }
+                        }
+                    }
+                    if(i != nx() && k != nz()){
+                        if(j != 0 && j != 1 && j != ny() - 1 && j != ny()){
+                            if(fv(i,j,k) > 0.00001){
+                                sv(i,j,k) /= fv(i,j,k);
+                            }
+                        }
+                    }
+                    if(i != nx() && j != ny()){
+                        if(k != 0 && k != 1 && k != nz() - 1 && k != nz()){
+                            if(fw(i,j,k) > 0.00001){
+                                sw(i,j,k) /= fw(i,j,k);
+                            }
+                        }
+                    }
 
-  // Material type of each grid cell
-  Array3D<MaterialType> cell_labels_;
+                    // if these ifs fail turn to 0
+                }
+            }
+        }
+    }
+
+    inline void boundarySplat(){
+        for(int j = 0; j <= ny(); j++){
+            for(int k = 0; k <= nz(); k++){
+                if(k != nz()){
+                    // v
+                    sv(0,j,k) = sv(1,j,k);
+                    sv(nx()-1,j,k) = sv(nx()-2,j,k);
+                }
+                if(j != ny()){
+                    // w
+                    sw(0,j,k) = sw(1,j,k);
+                    sw(nx()-1,j,k) = sw(nx()-2,j,k);
+                }
+                if(j != ny() && k != nz()){
+                    su(0,j,k) = 0.0;
+                    su(1,j,k) = 0.0;
+                    su(nx(),j,k) = 0.0;
+                    su(nx()-1,j,k) = 0.0;
+                }
+            }
+        }
+        for(int i = 0; i <= nx(); i++){
+            for(int k = 0; k <= nz(); k++){
+                if(k != nz()){
+                    // u
+                    su(i,0,k) = su(i,1,k);
+                    su(i,ny()-1,k) = su(i,ny()-2,k);
+                }
+                if(i != nx()){
+                    // w
+                    sw(i,0,k) = sw(i,1,k);
+                    sw(i,ny()-1,k) = sw(i,ny()-2,k);
+                }
+                if(i != nx() && k != nz()){
+                    sv(i,0,k) = 0.0;
+                    sv(i,1,k) = 0.0;
+                    sv(i,ny(),k) = 0.0;
+                    sv(i,ny()-1,k) = 0.0;
+                }
+            }
+        }
+        for(int i = 0; i <= nx(); i++){
+            for(int j = 0; j <= ny(); j++){
+                if(j != ny()){
+                    // u
+                    su(i,j,0) = su(i,j,1);
+                    su(i,j,nz()-1) = su(i,j,nz()-2);
+                }
+                if(i != nx()){
+                    // v
+                    sv(i,j,0) = sv(i,j,1);
+                    sv(i,j,nz()-1) = sv(i,j,nz()-2);
+                }
+                if(i != nx() && j != ny()){
+                    sw(i,j,0) = 0.0;
+                    sw(i,j,1) = 0.0;
+                    sw(i,j,nz()) = 0.0;
+                    sw(i,j,nz()-1) = 0.0;
+                }
+            }
+        }
+    }
 };
-
-#endif  // STAGGERED_GRID_H_

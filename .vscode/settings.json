@@ -60,5 +60,6 @@
         "thread": "cpp",
         "cinttypes": "cpp",
         "valarray": "cpp"
-    }
+    },
+    "C_Cpp.errorSquiggles": "Disabled"
 }
